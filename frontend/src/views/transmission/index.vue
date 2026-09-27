@@ -31,18 +31,26 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th>数据标记</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
-        <tr v-for="row in rows" :key="String(row.id)">
+        <tr v-for="row in rows" :key="String(row.id)" :class="{ 'row-abnormal': row.abnormal }">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td class="flag-cell">
+            <template v-if="rowFlags(row).length">
+              <span v-for="flag in rowFlags(row)" :key="flag" class="flag-badge">{{ flag }}</span>
+            </template>
+            <span v-else>—</span>
+          </td>
           <td class="row-actions">
             <button
               v-for="action in actions"
               :key="action"
               class="link"
               type="button"
+              :disabled="acting"
               @click="runAction(action, row)"
             >
               {{ action }}
@@ -50,36 +58,60 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无数据传输数据，可先登记传输链路</td>
+          <td :colspan="columns.length + 2" class="empty-state">暂无数据传输数据，可先登记传输链路</td>
         </tr>
       </tbody>
     </table>
 
     <footer class="page-foot">
-      <span>共 {{ total }} 条数据传输记录</span>
+      <span>共 {{ total }} 条数据传输记录，待处理 {{ summary.pending }} 条</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, string | number | boolean | string[] | null>
+
+type Summary = {
+  total: number
+  pending: number
+  abnormal: number
+  active: number
+  alarming: number
+  missing_reports: number
+}
 
 const ENDPOINT = '/api/transmission'
 const columns = ["链路编号", "所属站点", "传输方式", "上报频次", "最近上报时刻", "缺报次数", "链路带宽", "链路状态"]
 const actions = ["开通链路", "确认恢复", "停用链路"]
-const statuses = ["待开通", "正常上报", "缺报告警", "已停用"]
-const stats = [{"label": "在用链路", "value": 0}, {"label": "缺报链路", "value": 0}, {"label": "今日缺报次数", "value": 0}]
+const emptySummary: Summary = { total: 0, pending: 0, abnormal: 0, active: 0, alarming: 0, missing_reports: 0 }
 
 const rows = ref<Row[]>([])
 const total = ref(0)
+const summary = ref<Summary>({ ...emptySummary })
+const acting = ref(false)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+const stats = computed(() => [
+  { label: '在用链路', value: summary.value.active },
+  { label: '缺报链路', value: summary.value.alarming },
+  { label: '缺报次数合计', value: summary.value.missing_reports },
+])
+
+function rowFlags(row: Row): string[] {
+  return Array.isArray(row.flags) ? (row.flags as string[]) : []
+}
+
+function currentQuery(): string {
+  return new URLSearchParams(filters.value as Record<string, string>).toString()
+}
 
 function resetFilters() {
   filters.value = {}
@@ -87,7 +119,8 @@ function resetFilters() {
 }
 
 function exportRows() {
-  window.open(`${ENDPOINT}/export`, '_blank')
+  const query = currentQuery()
+  window.open(`${ENDPOINT}/export${query ? `?${query}` : ''}`, '_blank')
 }
 
 function openCreate() {
@@ -95,32 +128,39 @@ function openCreate() {
 }
 
 async function runAction(action: string, row: Row) {
+  if (acting.value) {
+    return
+  }
+  acting.value = true
   errorMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
-    if (!response.ok) {
-      throw new Error('数据传输动作未生效，请稍后重试')
+    const payload = (await response.json().catch(() => null)) as { ok?: boolean; message?: string } | null
+    if (!response.ok || payload?.ok === false) {
+      throw new Error(payload?.message ?? '数据传输动作未生效，请稍后重试')
     }
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '数据传输操作失败'
+  } finally {
+    acting.value = false
   }
 }
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}?${currentQuery()}`)
     if (!response.ok) {
       throw new Error('传输链路列表读取失败')
     }
     const payload = await response.json()
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    summary.value = { ...emptySummary, ...(payload.summary ?? {}) }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '数据传输列表读取失败'
   }
