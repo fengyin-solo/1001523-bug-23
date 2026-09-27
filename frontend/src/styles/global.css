@@ -33,3 +33,6 @@ body { margin: 0; background: #f6f8fb; color: #1f2937; }
 .link { border: none; background: none; color: var(--brand); cursor: pointer; padding: 0; }
 .page-foot { display: flex; justify-content: space-between; margin-top: 8px; font-size: 12px; color: var(--muted); }
 .error-text { color: #b42318; }
+.notice-text { color: var(--brand); }
+.issue-tag { color: #b42318; background: #fef3f2; border: 1px solid #fecdca; border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+.filter-item select { border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; background: #fff; }

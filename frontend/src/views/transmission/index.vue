@@ -19,9 +19,16 @@
     </div>
 
     <form class="filter-bar" @submit.prevent="reload">
-      <label v-for="field in filterFields" :key="field" class="filter-item">
-        <span>{{ field }}</span>
-        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+      <label class="filter-item">
+        <span>链路编号</span>
+        <input v-model="keyword" placeholder="按链路编号检索" />
+      </label>
+      <label class="filter-item">
+        <span>链路状态</span>
+        <select v-model="statusFilter">
+          <option value="">全部状态</option>
+          <option v-for="status in statuses" :key="status" :value="status">{{ status }}</option>
+        </select>
       </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
@@ -31,15 +38,20 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th>数据标记</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td>
+            <span v-if="row.issues?.length" class="issue-tag">{{ row.issues.join('；') }}</span>
+            <span v-else>—</span>
+          </td>
           <td class="row-actions">
             <button
-              v-for="action in actions"
+              v-for="action in availableActions(row)"
               :key="action"
               class="link"
               type="button"
@@ -47,47 +59,77 @@
             >
               {{ action }}
             </button>
+            <span v-if="!availableActions(row).length">—</span>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无数据传输数据，可先登记传输链路</td>
+          <td :colspan="columns.length + 2" class="empty-state">暂无数据传输数据，可先登记传输链路</td>
         </tr>
       </tbody>
     </table>
 
     <footer class="page-foot">
-      <span>共 {{ total }} 条数据传输记录</span>
+      <span>
+        共 {{ total }} 条数据传输记录 · 待处理 {{ summary['待处理'] ?? 0 }} 条 · 数据标记 {{ summary['数据标记'] ?? 0 }} 条
+      </span>
+      <span v-if="noticeMessage" class="notice-text">{{ noticeMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, string | number | null> & { id: number; status?: string; issues?: string[] }
 
 const ENDPOINT = '/api/transmission'
 const columns = ["链路编号", "所属站点", "传输方式", "上报频次", "最近上报时刻", "缺报次数", "链路带宽", "链路状态"]
 const actions = ["开通链路", "确认恢复", "停用链路"]
 const statuses = ["待开通", "正常上报", "缺报告警", "已停用"]
-const stats = [{"label": "在用链路", "value": 0}, {"label": "缺报链路", "value": 0}, {"label": "今日缺报次数", "value": 0}]
+// 与后端状态流转表保持一致：只有起始状态匹配的链路才展示对应动作。
+const ACTION_SOURCES: Record<string, string[]> = {
+  开通链路: ["待开通"],
+  确认恢复: ["缺报告警"],
+  停用链路: ["待开通", "正常上报", "缺报告警"],
+}
 
 const rows = ref<Row[]>([])
 const total = ref(0)
+const summary = ref<Record<string, number>>({})
 const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const noticeMessage = ref('')
+const keyword = ref('')
+const statusFilter = ref('')
+
+const stats = computed(() => [
+  { label: '在用链路', value: summary.value['在用链路'] ?? 0 },
+  { label: '缺报链路', value: summary.value['缺报链路'] ?? 0 },
+  { label: '今日缺报次数', value: summary.value['今日缺报次数'] ?? 0 },
+])
+
+function availableActions(row: Row) {
+  return actions.filter((action) => (ACTION_SOURCES[action] ?? []).includes(String(row.status ?? '')))
+}
+
+function currentQuery() {
+  const params = new URLSearchParams()
+  if (keyword.value.trim()) params.set('keyword', keyword.value.trim())
+  if (statusFilter.value) params.set('status', statusFilter.value)
+  return params.toString()
+}
 
 function resetFilters() {
-  filters.value = {}
+  keyword.value = ''
+  statusFilter.value = ''
   void reload()
 }
 
 function exportRows() {
-  window.open(`${ENDPOINT}/export`, '_blank')
+  const query = currentQuery()
+  window.open(`${ENDPOINT}/export${query ? `?${query}` : ''}`, '_blank')
 }
 
 function openCreate() {
@@ -96,14 +138,17 @@ function openCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  noticeMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ values: { action } }),
     })
-    if (!response.ok) {
-      throw new Error('数据传输动作未生效，请稍后重试')
+    const payload = await response.json()
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload?.message ?? '数据传输动作未生效，请稍后重试')
     }
+    noticeMessage.value = payload.message ?? ''
     await reload()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '数据传输操作失败'
@@ -112,15 +157,16 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const query = currentQuery()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}${query ? `?${query}` : ''}`)
     if (!response.ok) {
       throw new Error('传输链路列表读取失败')
     }
     const payload = await response.json()
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    summary.value = payload.summary ?? {}
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '数据传输列表读取失败'
   }

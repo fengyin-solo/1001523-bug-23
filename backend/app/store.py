@@ -4,9 +4,12 @@
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from app.seed import SEED_ROWS
+
+# 模块级统计口径：rows -> {"pending": int, "abnormal": int}
+MetricsProvider = Callable[[list[dict[str, Any]]], dict[str, int]]
 
 
 class Store:
@@ -14,12 +17,17 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        self._metrics_providers: dict[str, MetricsProvider] = {}
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)
 
     def rows(self, module: str) -> list[dict[str, Any]]:
         return self._tables.setdefault(module, [])
+
+    def register_metrics(self, module: str, provider: MetricsProvider) -> None:
+        """模块可以注册自己的待处理/异常口径，概览看板优先使用。"""
+        self._metrics_providers[module] = provider
 
     def find(self, module: str, entry_id: int) -> dict[str, Any] | None:
         for row in self.rows(module):
@@ -31,11 +39,19 @@ class Store:
         modules: list[dict[str, object]] = []
         for name in self.module_names():
             rows = self.rows(name)
+            provider = self._metrics_providers.get(name)
+            if provider is not None:
+                metrics = provider(rows)
+                pending = int(metrics.get("pending", 0))
+                abnormal = int(metrics.get("abnormal", 0))
+            else:
+                pending = sum(1 for row in rows if row.get("pending"))
+                abnormal = sum(1 for row in rows if row.get("abnormal"))
             modules.append({
                 "name": name,
                 "created": len(rows),
-                "pending": sum(1 for row in rows if row.get("pending")),
-                "abnormal": sum(1 for row in rows if row.get("abnormal")),
+                "pending": pending,
+                "abnormal": abnormal,
             })
         cards = [
             {"label": "业务模块", "value": len(modules)},
